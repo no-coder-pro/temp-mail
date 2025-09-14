@@ -4,4 +4,3 @@ requests
 cloudscraper
 beautifulsoup4
 brotli
-python-zstandard
