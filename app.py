@@ -9,13 +9,14 @@ import base64
 import json
 import gzip
 import brotli
+import zstandard as zstd
 import cloudscraper
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import threading
 import uuid
 import os
-from functools import wraps
+import socket
 
 app = Flask(__name__)
 CORS(app)
@@ -58,6 +59,15 @@ class TempMailService:
                 try:
                     return brotli.decompress(content).decode('utf-8')
                 except brotli.error:
+                    try:
+                        return content.decode('utf-8')
+                    except UnicodeDecodeError:
+                        return None
+            elif response.headers.get('content-encoding') == 'zstd':
+                try:
+                    dctx = zstd.ZstdDecompressor()
+                    return dctx.decompress(content).decode('utf-8')
+                except zstd.ZstdError:
                     try:
                         return content.decode('utf-8')
                     except UnicodeDecodeError:
@@ -114,7 +124,7 @@ class TempMailService:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
                 'Accept': 'application/json, text/plain, */*',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
                 'Origin': 'https://temp-mail.org',
                 'Referer': 'https://temp-mail.org/en/10minutemail' if ten_minute else 'https://temp-mail.org/en/',
                 'Sec-Ch-Ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
@@ -182,7 +192,7 @@ class TempMailService:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
                 'Accept': '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
                 'Origin': 'https://temp-mail.org',
                 'Referer': 'https://temp-mail.org/en/10minutemail' if ten_minute else 'https://temp-mail.org/en/',
                 'Sec-Ch-Ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
@@ -238,7 +248,7 @@ class TempMailService:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
                 'Sec-Ch-Ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
                 'Sec-Ch-Ua-Mobile': '?0',
                 'Sec-Ch-Ua-Platform': '"Windows"',
@@ -353,73 +363,302 @@ class TempMailService:
             print(f"[DEBUG] Error in check_messages: {str(e)}")
             return {"error": f"Error checking messages: {str(e)}"}, 500
 
+    def get_edu_email(self):
+        url = "https://etempmail.com/getEmailAddress"
+        headers = {
+            'accept': '*/*',
+            'accept-encoding': 'gzip, deflate, br',
+            'accept-language': 'en-US,en;q=0.6',
+            'origin': 'https://etempmail.com',
+            'referer': 'https://etempmail.com/',
+            'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Brave";v="140"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'sec-gpc': '1',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+            'x-requested-with': 'XMLHttpRequest'
+        }
+        scraper = cloudscraper.create_scraper()
+        for attempt in range(3):
+            try:
+                response = scraper.post(url, headers=headers)
+                if response.status_code == 200:
+                    decompressed = self.decompress_edu_response(response)
+                    if not decompressed:
+                        if attempt < 2:
+                            time.sleep(2)
+                            continue
+                        return None, None, None
+                    try:
+                        data = json.loads(decompressed)
+                        return data['address'], data['recover_key'], response.cookies.get_dict()
+                    except json.JSONDecodeError:
+                        if attempt < 2:
+                            time.sleep(2)
+                            continue
+                        return None, None, None
+                else:
+                    if attempt < 2:
+                        time.sleep(2)
+                        continue
+                    return None, None, None
+            except Exception:
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                return None, None, None
+        return None, None, None
+
+    def check_edu_inbox(self, email, cookies):
+        url = "https://etempmail.com/getInbox"
+        headers = {
+            'accept': '*/*',
+            'accept-encoding': 'gzip, deflate, br',
+            'accept-language': 'en-US,en;q=0.6',
+            'origin': 'https://etempmail.com',
+            'referer': 'https://etempmail.com/',
+            'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Brave";v="140"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'sec-gpc': '1',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+            'x-requested-with': 'XMLHttpRequest'
+        }
+        scraper = cloudscraper.create_scraper()
+        try:
+            response = scraper.post(url, headers=headers, cookies=cookies)
+            if response.status_code == 200:
+                decompressed = self.decompress_edu_response(response)
+                if decompressed is None:
+                    return []
+                try:
+                    data = json.loads(decompressed)
+                    return data
+                except json.JSONDecodeError:
+                    return []
+            else:
+                return []
+        except Exception:
+            return []
+
+    def generate_edu_email(self):
+        try:
+            email, recover_key, cookies = self.get_edu_email()
+            if not email:
+                return {"error": "Failed to generate email"}, 500
+            access_token = str(uuid.uuid4())
+            self.email_sessions[access_token] = {
+                "email": email,
+                "recover_key": recover_key,
+                "cookies": cookies,
+                "created_at": time.time()
+            }
+            return {
+                "api_owner": "@ISmartCoder",
+                "api_dev": "@TheSmartDev",
+                "edu_mail": email,
+                "access_token": access_token
+            }
+        except Exception as e:
+            return {"error": str(e)}, 500
+
+    def check_edu_messages(self, token):
+        try:
+            if token not in self.email_sessions:
+                return {"error": "Invalid or expired token"}, 404
+            session = self.email_sessions[token]
+            email = session["email"]
+            cookies = session["cookies"]
+            inbox = self.check_edu_inbox(email, cookies)
+            messages = []
+            for mail in inbox:
+                soup = BeautifulSoup(mail['body'], 'html.parser')
+                body_text = soup.get_text().strip()
+                messages.append({
+                    "From": mail['from'],
+                    "Subject": mail['subject'],
+                    "Date": mail['date'],
+                    "body": body_text,
+                    "Message": body_text
+                })
+            response_data = {
+                "api_owner": "@ISmartCoder",
+                "api_dev": "@TheSmartDev",
+                "edu_mail": email,
+                "access_token": token,
+                "messages": messages
+            }
+            if messages:
+                latest_message = messages[0]
+                response_data.update({
+                    "Message": latest_message["Message"],
+                    "From": latest_message["From"],
+                    "body": latest_message["body"],
+                    "Date": latest_message["Date"],
+                    "Subject": latest_message["Subject"]
+                })
+            else:
+                response_data.update({
+                    "Message": "",
+                    "From": "",
+                    "body": "",
+                    "Date": "",
+                    "Subject": ""
+                })
+            return response_data
+        except Exception as e:
+            return {"error": str(e)}, 500
+
 temp_mail_service = TempMailService()
 
-@app.route('/tempmail/gen', methods=['GET'])
-def generate_temp_mail_route():
-    ten_minute = request.args.get('ten_minute', 'false').lower() == 'true'
-    result = temp_mail_service.generate_temp_mail(ten_minute)
-    status_code = result.pop('status_code', 200)
-    return jsonify(result), status_code
+@app.route('/')
+def root():
+    return jsonify({
+        "api_name": "Smart TempMail API",
+        "api_owner": "@ISmartCoder",
+        "api_dev": "@TheSmartDev",
+        "info": "Welcome to the Smart TempMail API! Use the following endpoints:",
+        "endpoints": {
+            "/api/gen": "Generate a regular temporary email. Returns {'temp_mail': '...', 'access_token': '...'}",
+            "/api/chk?token=YOUR_TOKEN": "Check inbox for a regular temporary email.",
+            "/api/10min/gen": "Generate a 10-minute temporary email. Returns {'temp_mail': '...', 'access_token': '...'}",
+            "/api/10min/chk?token=YOUR_TOKEN": "Check inbox for a 10-minute temporary email.",
+            "/api/edu/gen": "Generate an .edu temporary email. Returns {'edu_mail': '...', 'access_token': '...'}",
+            "/api/edu/chk?token=YOUR_TOKEN": "Check inbox for an .edu temporary email."
+        }
+    })
 
-@app.route('/tempmail/inbox', methods=['GET'])
-def check_inbox_route():
+@app.route('/api/gen')
+def generate_mail():
+    try:
+        result = temp_mail_service.generate_temp_mail(ten_minute=False)
+        if isinstance(result, tuple) and len(result) == 2:
+            response_data, status_code = result
+        else:
+            response_data = result
+            status_code = 200
+        return jsonify(response_data), status_code
+    except Exception as e:
+        print(f"[DEBUG] Error in /api/gen: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/chk')
+def check_mail():
     token = request.args.get('token')
     if not token:
         return jsonify({"error": "Missing token parameter"}), 400
-    result = temp_mail_service.check_messages(token)
-    status_code = result.pop('status_code', 200)
-    return jsonify(result), status_code
+    try:
+        result = temp_mail_service.check_messages(token)
+        if isinstance(result, tuple) and len(result) == 2:
+            response_data, status_code = result
+        else:
+            response_data = result
+            status_code = 200
+        return jsonify(response_data), status_code
+    except Exception as e:
+        print(f"[DEBUG] Error in /api/chk: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/')
-def api_documentation():
-    return jsonify({
-        "api_name": "TempMail API",
-        "api_owner": "@ISmartCoder",
-        "api_dev": "@WeSmartDevelopers",
-        "endpoints": {
-            "/tempmail/gen": {
-                "method": "GET",
-                "description": "Generates a temporary email address.",
-                "parameters": {
-                    "ten_minute": "Optional. Set to 'true' for a 10-minute email, 'false' otherwise. Defaults to 'false'."
-                },
-                "example_response": {
-                    "api_owner": "@ISmartCoder",
-                    "api_dev": "@WeSmartDevelopers",
-                    "temp_mail": "example@tempmail.org",
-                    "access_token": "eyJ...",
-                    "time_taken": "0.50s",
-                    "expires_at": "N/A"
-                }
-            },
-            "/tempmail/inbox": {
-                "method": "GET",
-                "description": "Checks the inbox of a temporary email address.",
-                "parameters": {
-                    "token": "Required. The access_token received from /tempmail/gen."
-                },
-                "example_response": {
-                    "mailbox": "example@tempmail.org",
-                    "messages": [
-                        {
-                            "id": "...",
-                            "from": "sender@example.com",
-                            "subject": "Test Subject",
-                            "body": "Email body content...",
-                            "receivedAt": "YYYY-MM-DD HH:MM:SS",
-                            "api_dev": "@ISmartCoder",
-                            "api_updates": "@WeSmartDevelopers"
-                        }
-                    ],
-                    "api_owner": "@ISmartCoder",
-                    "api_dev": "@WeSmartDevelopers",
-                    "expires_at": "N/A"
-                }
-            }
-        },
-        "info": "Use the /tempmail/gen endpoint to get a temporary email and an access_token. Then use the /tempmail/inbox endpoint with the access_token to check for messages."
-    })
+@app.route('/api/10min/gen')
+def generate_10min_mail():
+    try:
+        result = temp_mail_service.generate_temp_mail(ten_minute=True)
+        if isinstance(result, tuple) and len(result) == 2:
+            response_data, status_code = result
+        else:
+            response_data = result
+            status_code = 200
+        return jsonify(response_data), status_code
+    except Exception as e:
+        print(f"[DEBUG] Error in /api/10min/gen: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(debug=True)
+@app.route('/api/10min/chk')
+def check_10min_mail():
+    token = request.args.get('token')
+    if not token:
+        return jsonify({"error": "Missing token parameter"}), 400
+    try:
+        result = temp_mail_service.check_messages(token)
+        if isinstance(result, tuple) and len(result) == 2:
+            response_data, status_code = result
+        else:
+            response_data = result
+            status_code = 200
+        return jsonify(response_data), status_code
+    except Exception as e:
+        print(f"[DEBUG] Error in /api/10min/chk: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/edu/gen')
+def generate_edu_email():
+    try:
+        result = temp_mail_service.generate_edu_email()
+        if isinstance(result, tuple) and len(result) == 2:
+            response_data, status_code = result
+        else:
+            response_data = result
+            status_code = 200
+        return jsonify(response_data), status_code
+    except Exception as e:
+        print(f"[DEBUG] Error in /api/edu/gen: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/edu/chk')
+def check_edu_messages():
+    token = request.args.get('token')
+    if not token:
+        return jsonify({"error": "Missing token parameter"}), 400
+    try:
+        result = temp_mail_service.check_edu_messages(token)
+        if isinstance(result, tuple) and len(result) == 2:
+            response_data, status_code = result
+        else:
+            response_data = result
+            status_code = 200
+        return jsonify(response_data), status_code
+    except Exception as e:
+        print(f"[DEBUG] Error in /api/edu/chk: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+def cleanup_expired_sessions():
+    while True:
+        current_time = time.time()
+        expired_tokens = []
+        for token, session in temp_mail_service.email_sessions.items():
+            if current_time - session["created_at"] > 7200:
+                expired_tokens.append(token)
+        for token in expired_tokens:
+            del temp_mail_service.email_sessions[token]
+        time.sleep(300)
+
+def get_local_ip():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+if __name__ == "__main__":
+    local_ip = get_local_ip()
+    port = int(os.getenv("PORT", 5000)) # Changed default port to 5000 for Flask
+    print(f"TempMail API Server Starting...")
+    print(f"Local IP: {local_ip}")
+    print(f"Server running on: http://{local_ip}:{port}")
+    print(f"API Documentation: http://{local_ip}:{port}/")
+    print(f"Generate Regular Mail: http://{local_ip}:{port}/api/gen")
+    print(f"Check Regular Messages: http://{local_ip}:{port}/api/chk?token=YOUR_TOKEN")
+    print(f"Generate 10-Minute Mail: http://{local_ip}:{port}/api/10min/gen")
+    print(f"Check 10-Minute Messages: http://{local_ip}:{port}/api/10min/chk?token=YOUR_TOKEN")
+    print(f"Generate Edu Mail: http://{local_ip}:{port}/api/edu/gen")
+    print(f"Check Edu Messages: http://{local_ip}:{port}/api/edu/chk?token=YOUR_TOKEN")
+    cleanup_thread = threading.Thread(target=cleanup_expired_sessions, daemon=True)
+    cleanup_thread.start()
+    app.run(host="0.0.0.0", port=port, debug=True)
