@@ -3,14 +3,12 @@
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import requests
-import socket
 import time
 import re
 import base64
 import json
 import gzip
 import brotli
-import zstandard as zstd
 import cloudscraper
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
@@ -60,15 +58,6 @@ class TempMailService:
                 try:
                     return brotli.decompress(content).decode('utf-8')
                 except brotli.error:
-                    try:
-                        return content.decode('utf-8')
-                    except UnicodeDecodeError:
-                        return None
-            elif response.headers.get('content-encoding') == 'zstd':
-                try:
-                    dctx = zstd.ZstdDecompressor()
-                    return dctx.decompress(content).decode('utf-8')
-                except zstd.ZstdError:
                     try:
                         return content.decode('utf-8')
                     except UnicodeDecodeError:
@@ -355,4 +344,36 @@ class TempMailService:
                 enhanced_messages.append(enhanced_message)
             return {
                 "mailbox": session['email'],
-                "
+                "messages": enhanced_messages,
+                "api_owner": "@ISmartCoder",
+                "api_dev": "@WeSmartDevelopers",
+                "expires_at": (datetime.fromtimestamp(session['created_at']) + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S') if session['ten_minute'] else "N/A"
+            }
+        except Exception as e:
+            print(f"[DEBUG] Error in check_messages: {str(e)}")
+            return {"error": f"Error checking messages: {str(e)}"}, 500
+
+temp_mail_service = TempMailService()
+
+@app.route('/tempmail/gen', methods=['GET'])
+def generate_temp_mail_route():
+    ten_minute = request.args.get('ten_minute', 'false').lower() == 'true'
+    result = temp_mail_service.generate_temp_mail(ten_minute)
+    status_code = result.pop('status_code', 200)
+    return jsonify(result), status_code
+
+@app.route('/tempmail/inbox', methods=['GET'])
+def check_inbox_route():
+    token = request.args.get('token')
+    if not token:
+        return jsonify({"error": "Missing token parameter"}), 400
+    result = temp_mail_service.check_messages(token)
+    status_code = result.pop('status_code', 200)
+    return jsonify(result), status_code
+
+@app.route('/')
+def home():
+    return send_file('index.html')
+
+if __name__ == '__main__':
+    app.run(debug=True)
