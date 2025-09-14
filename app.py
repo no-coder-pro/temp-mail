@@ -372,8 +372,54 @@ def check_inbox_route():
     return jsonify(result), status_code
 
 @app.route('/')
-def home():
-    return send_file('index.html')
+def api_documentation():
+    return jsonify({
+        "api_name": "TempMail API",
+        "api_owner": "@ISmartCoder",
+        "api_dev": "@WeSmartDevelopers",
+        "endpoints": {
+            "/tempmail/gen": {
+                "method": "GET",
+                "description": "Generates a temporary email address.",
+                "parameters": {
+                    "ten_minute": "Optional. Set to 'true' for a 10-minute email, 'false' otherwise. Defaults to 'false'."
+                },
+                "example_response": {
+                    "api_owner": "@ISmartCoder",
+                    "api_dev": "@WeSmartDevelopers",
+                    "temp_mail": "example@tempmail.org",
+                    "access_token": "eyJ...",
+                    "time_taken": "0.50s",
+                    "expires_at": "N/A"
+                }
+            },
+            "/tempmail/inbox": {
+                "method": "GET",
+                "description": "Checks the inbox of a temporary email address.",
+                "parameters": {
+                    "token": "Required. The access_token received from /tempmail/gen."
+                },
+                "example_response": {
+                    "mailbox": "example@tempmail.org",
+                    "messages": [
+                        {
+                            "id": "...",
+                            "from": "sender@example.com",
+                            "subject": "Test Subject",
+                            "body": "Email body content...",
+                            "receivedAt": "YYYY-MM-DD HH:MM:SS",
+                            "api_dev": "@ISmartCoder",
+                            "api_updates": "@WeSmartDevelopers"
+                        }
+                    ],
+                    "api_owner": "@ISmartCoder",
+                    "api_dev": "@WeSmartDevelopers",
+                    "expires_at": "N/A"
+                }
+            }
+        },
+        "info": "Use the /tempmail/gen endpoint to get a temporary email and an access_token. Then use the /tempmail/inbox endpoint with the access_token to check for messages."
+    })
 
 if __name__ == '__main__':
     app.run(debug=True)
