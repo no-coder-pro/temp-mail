@@ -1,7 +1,6 @@
 Flask
 Flask-Cors
 requests
-socket
 cloudscraper
 beautifulsoup4
 brotli
